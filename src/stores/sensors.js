@@ -1,148 +1,390 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref } from 'vue'
+import { supabase } from '@/lib/supabase'
+import * as tbsvc from '@/services/thingsboard'
+import { useThingsboardStore } from '@/stores/thingsboard'
+
+const WINDOW_MIN = 15 // visible window in minutes
+const LIVE_POLL_MS = 30000 // how often we poll the real source
 
 export const useSensorsStore = defineStore('sensors', () => {
-  // --- State ---
-  const temperature = ref(13.2)
-  const humidity = ref(68)
-  const co2 = ref(420)
-  const acOn = ref(false)
+  // --- State (scoped to the currently open room) ---
+  const room = ref(null)
+  const devices = ref([])
+  const readingsByDevice = ref({}) // { [deviceId]: [readings asc, last WINDOW_MIN min] }
+  const actuations = ref([])
+  const logs = ref([])
+  const loading = ref(false)
+  const connected = ref(false)
+  const liveRunning = ref(false)
 
-  const tempHistory = ref(
-    Array.from({ length: 20 }, (_, i) => 12.5 + Math.sin(i * 0.5) * 1.2 + Math.random() * 0.3)
-  )
-  const humidHistory = ref(
-    Array.from({ length: 20 }, (_, i) => 67 + Math.sin(i * 0.3) * 3 + Math.random())
-  )
-  const co2History = ref(
-    Array.from({ length: 20 }, (_, i) => 400 + Math.sin(i * 0.4) * 60 + Math.random() * 20)
-  )
+  let channel = null
+  let liveTimer = null
+  const lastAtByDevice = {} // deviceId -> ISO string of last stored reading
 
-  const lastUpdated = ref(null)
-  const isConnected = ref(false)
-  const logs = ref([
-    { id: 1, time: timeNow(), msg: 'Sustav pokrenut — demo način rada.', type: 'warn' },
-    { id: 2, time: timeNow(), msg: 'Senzori inicijalizirani.', type: 'ok' },
-  ])
-
-  const tbConfig = ref({
-    host: '',
-    token: '',
-    protocol: 'HTTP',
-  })
-
-  // --- Computed ---
-  const tempStatus = computed(() => {
-    const t = temperature.value
-    if (t < 10) return { label: 'Prehladno', color: 'warn' }
-    if (t > 16) return { label: 'Previše toplo — provjeri klimu', color: 'bad' }
-    return { label: 'Optimalno (10–16°C)', color: 'ok' }
-  })
-
-  const humidStatus = computed(() => {
-    const h = humidity.value
-    if (h < 50) return { label: 'Presuho — rizik za čepove', color: 'bad' }
-    if (h > 80) return { label: 'Previsoka vlaga — plijesan', color: 'warn' }
-    return { label: 'Optimalno (60–75%)', color: 'ok' }
-  })
-
-  const co2Status = computed(() => {
-    const c = co2.value
-    if (c < 600) return { label: 'Odličan zrak', color: 'ok' }
-    if (c < 1000) return { label: 'Malo povišeno', color: 'warn' }
-    return { label: 'Visoko — prozrači podrum', color: 'bad' }
-  })
-
-  // Dew point calculated from temp + humidity (Magnus formula)
-  const dewPoint = computed(() => {
-    const T = temperature.value
-    const RH = humidity.value
-    const a = 17.27, b = 237.7
-    const alpha = ((a * T) / (b + T)) + Math.log(RH / 100)
-    return parseFloat(((b * alpha) / (a - alpha)).toFixed(1))
-  })
-
-  // AC auto-logic: turn on if temp > 15.5 or humidity > 78
-  const acStatus = computed(() => {
-    const shouldRun = temperature.value > 15.5 || humidity.value > 78
-    return {
-      active: acOn.value || shouldRun,
-      reason: temperature.value > 15.5
-        ? 'Temperatura visoka'
-        : humidity.value > 78
-          ? 'Vlaga visoka'
-          : acOn.value
-            ? 'Ručno uključeno'
-            : 'Standby',
-    }
-  })
-
-  // --- Actions ---
+  // --- Helpers ---
   function timeNow() {
     return new Date().toTimeString().slice(0, 8)
   }
 
   function addLog(msg, type = 'ok') {
-    logs.value.unshift({ id: Date.now(), time: timeNow(), msg, type })
+    logs.value.unshift({ id: Date.now() + Math.random(), time: timeNow(), msg, type })
     if (logs.value.length > 50) logs.value.pop()
   }
 
-  function toggleAc() {
-    acOn.value = !acOn.value
-    addLog(`Klima ${acOn.value ? 'uključena ručno' : 'isključena ručno'}.`, acOn.value ? 'ok' : 'warn')
+  function sensorDevices() {
+    return devices.value.filter((d) => d.type === 'sensor')
   }
 
-  function pushHistory(temp, humid, c) {
-    tempHistory.value.push(temp)
-    humidHistory.value.push(humid)
-    co2History.value.push(c)
-    if (tempHistory.value.length > 20) tempHistory.value.shift()
-    if (humidHistory.value.length > 20) humidHistory.value.shift()
-    if (co2History.value.length > 20) co2History.value.shift()
+  function pruneWindow(deviceId) {
+    const cutoff = Date.now() - WINDOW_MIN * 60 * 1000
+    const arr = readingsByDevice.value[deviceId]
+    if (arr) {
+      readingsByDevice.value[deviceId] = arr.filter(
+        (r) => new Date(r.recorded_at).getTime() >= cutoff,
+      )
+    }
   }
 
-  function mockTick() {
-    temperature.value = parseFloat((12 + Math.random() * 4).toFixed(1))
-    humidity.value = parseFloat((58 + Math.random() * 22).toFixed(0))
-    co2.value = parseFloat((360 + Math.random() * 280).toFixed(0))
-    lastUpdated.value = timeNow()
-    pushHistory(temperature.value, humidity.value, co2.value)
-    addLog(`Novi očitci — T: ${temperature.value}°C, RH: ${humidity.value}%, CO₂: ${co2.value} ppm`)
+  // --- Loading a room ---
+  async function loadRoom(roomId) {
+    loading.value = true
+    await unload()
+    await Promise.all([fetchRoom(roomId), fetchDevices(roomId), fetchActuations(roomId)])
+    await fetchAllReadings(roomId)
+    subscribeRealtime(roomId)
+    loading.value = false
+    addLog(`Prostorija "${room.value?.name ?? ''}" učitana.`)
   }
 
-  async function fetchFromThingsboard() {
-    const { host, token } = tbConfig.value
-    if (!host || !token) {
-      addLog('ThingsBoard nije konfiguriran.', 'warn')
+  async function fetchRoom(roomId) {
+    const { data, error } = await supabase
+      .from('rooms')
+      .select('id, name, location, created_at')
+      .eq('id', roomId)
+      .single()
+    if (error) {
+      addLog(`Greška: ${error.message}`, 'warn')
+      return
+    }
+    room.value = data
+  }
+
+  async function fetchDevices(roomId) {
+    const { data } = await supabase
+      .from('devices')
+      .select('id, name, type, external_id, metrics, state, source, created_at')
+      .eq('room_id', roomId)
+      .order('created_at', { ascending: true })
+    devices.value = data ?? []
+  }
+
+  async function fetchReadings(deviceId) {
+    const since = new Date(Date.now() - WINDOW_MIN * 60 * 1000).toISOString()
+    const { data, error } = await supabase
+      .from('readings')
+      .select('id, temperature, humidity, co2, recorded_at')
+      .eq('device_id', deviceId)
+      .gte('recorded_at', since)
+      .order('recorded_at', { ascending: true })
+    if (error) {
+      addLog(`Greška pri dohvatu očitanja: ${error.message}`, 'warn')
+      return
+    }
+    readingsByDevice.value[deviceId] = data ?? []
+    const last = data?.[data.length - 1]
+    if (last) lastAtByDevice[deviceId] = last.recorded_at
+  }
+
+  async function fetchAllReadings() {
+    await Promise.all(sensorDevices().map((d) => fetchReadings(d.id)))
+  }
+
+  async function fetchActuations(roomId) {
+    const { data } = await supabase
+      .from('actuations')
+      .select('id, device_id, command, state, created_at')
+      .eq('room_id', roomId)
+      .order('created_at', { ascending: false })
+      .limit(30)
+    actuations.value = data ?? []
+  }
+
+  // --- Realtime ---
+  function subscribeRealtime(roomId) {
+    channel = supabase
+      .channel(`room-${roomId}`)
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'readings', filter: `room_id=eq.${roomId}` },
+        (payload) => {
+          const r = payload.new
+          const arr = readingsByDevice.value[r.device_id]
+          if (!arr) return
+          if (arr.some((x) => x.id === r.id)) return
+          arr.push(r)
+          arr.sort((a, b) => new Date(a.recorded_at) - new Date(b.recorded_at))
+          pruneWindow(r.device_id)
+        },
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'devices', filter: `room_id=eq.${roomId}` },
+        () => fetchDevices(roomId),
+      )
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'actuations', filter: `room_id=eq.${roomId}` },
+        (payload) => actuations.value.unshift(payload.new),
+      )
+      .subscribe((status) => {
+        connected.value = status === 'SUBSCRIBED'
+      })
+  }
+
+  async function unload() {
+    stopLiveFeed()
+    if (channel) {
+      await supabase.removeChannel(channel)
+      channel = null
+    }
+    connected.value = false
+    room.value = null
+    devices.value = []
+    readingsByDevice.value = {}
+    actuations.value = []
+    for (const k of Object.keys(lastAtByDevice)) delete lastAtByDevice[k]
+  }
+
+  // --- Devices ---
+  async function addSensorDevice({ name, external_id, metrics, source = 'thingsboard' }) {
+    const { data, error } = await supabase
+      .from('devices')
+      .insert({
+        room_id: room.value.id,
+        name,
+        type: 'sensor',
+        external_id: external_id || null,
+        metrics: metrics || [],
+        source,
+      })
+      .select()
+      .single()
+    if (error) throw error
+    devices.value.push(data)
+    readingsByDevice.value[data.id] = []
+    addLog(`Senzor "${name}" dodan.`)
+    // Pull initial real history for this device from its source.
+    if (external_id && metrics?.length) {
+      await refreshHistory(data)
+    }
+    return data
+  }
+
+  async function addActuator({ name, external_id = null, source = 'thingsboard' }) {
+    const { data, error } = await supabase
+      .from('devices')
+      .insert({ room_id: room.value.id, name, type: 'actuator', state: false, external_id, source })
+      .select()
+      .single()
+    if (error) throw error
+    devices.value.push(data)
+    addLog(`Aktuator "${name}" dodan.`)
+    return data
+  }
+
+  // Import a device discovered on ThingsBoard into the current room.
+  async function importThingsboardDevice(tbDevice, kind) {
+    const exists = devices.value.find((d) => d.external_id === tbDevice.id)
+    if (exists) {
+      addLog(`"${tbDevice.name}" je već uvezen.`, 'warn')
+      return exists
+    }
+    if (kind === 'actuator') {
+      return addActuator({ name: tbDevice.name, external_id: tbDevice.id, source: 'thingsboard' })
+    }
+    const tb = useThingsboardStore()
+    let metrics = []
+    try {
+      const info = await tbsvc.detect(tb.host, tb.token, tbDevice.id)
+      metrics = info.metrics
+    } catch (err) {
+      addLog(`Ne mogu pročitati veličine za "${tbDevice.name}": ${err.message}`, 'warn')
+    }
+    return addSensorDevice({
+      name: tbDevice.name,
+      external_id: tbDevice.id,
+      metrics,
+      source: 'thingsboard',
+    })
+  }
+
+  async function removeDevice(id) {
+    const { error } = await supabase.from('devices').delete().eq('id', id)
+    if (error) throw error
+    devices.value = devices.value.filter((d) => d.id !== id)
+    delete readingsByDevice.value[id]
+    addLog('Uređaj uklonjen.', 'warn')
+  }
+
+  // --- Actuation (per-device on/off) ---
+  async function toggleActuator(device) {
+    const next = !device.state
+    // If this actuator lives on ThingsBoard, send the command to the platform too.
+    if (device.source === 'thingsboard' && device.external_id) {
+      try {
+        const tb = useThingsboardStore()
+        await tbsvc.sendCommand(tb.host, tb.token, device.external_id, next)
+      } catch (err) {
+        addLog(`ThingsBoard naredba nije prošla: ${err.message}`, 'warn')
+      }
+    }
+    const { error } = await supabase.from('devices').update({ state: next }).eq('id', device.id)
+    if (error) {
+      addLog(`Greška pri aktuaciji: ${error.message}`, 'warn')
+      return
+    }
+    device.state = next
+    await supabase.from('actuations').insert({
+      room_id: room.value.id,
+      device_id: device.id,
+      command: next ? 'on' : 'off',
+      state: next,
+    })
+    addLog(`"${device.name}" ${next ? 'uključen' : 'isključen'}.`, next ? 'ok' : 'warn')
+  }
+
+  // --- Real data (ThingsBoard) ---
+  function mapRows(device, rows) {
+    return rows.map((r) => {
+      const row = {
+        room_id: room.value.id,
+        device_id: device.id,
+        temperature: null,
+        humidity: null,
+        co2: null,
+        recorded_at: r.recorded_at,
+      }
+      for (const m of device.metrics) row[m] = r[m] ?? null
+      return row
+    })
+  }
+
+  async function insertReadings(device, rows) {
+    if (!rows.length) return 0
+    const arr = readingsByDevice.value[device.id] || []
+    const known = new Set(arr.map((r) => new Date(r.recorded_at).getTime()))
+    const fresh = mapRows(device, rows).filter(
+      (r) => !known.has(new Date(r.recorded_at).getTime()),
+    )
+    if (!fresh.length) return 0
+    const { error } = await supabase.from('readings').insert(fresh)
+    if (error) {
+      addLog(`Greška pri upisu: ${error.message}`, 'warn')
+      return 0
+    }
+    return fresh.length
+  }
+
+  // Fetch from the user's ThingsBoard platform.
+  async function sourceHistory(device) {
+    const tb = useThingsboardStore()
+    return tbsvc.fetchHistory(tb.host, tb.token, device.external_id, device.metrics, null, WINDOW_MIN)
+  }
+
+  async function sourceLatest(device) {
+    const tb = useThingsboardStore()
+    return tbsvc.fetchLatest(tb.host, tb.token, device.external_id, device.metrics, null)
+  }
+
+  // Backfill historical data for a single sensor device from its source.
+  async function refreshHistory(device) {
+    if (!device.external_id || !device.metrics?.length) {
+      addLog(`"${device.name}" nema token ili odabrane veličine.`, 'warn')
       return
     }
     try {
-      const url = `${host}/api/v1/${token}/attributes`
-      const res = await fetch(url)
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const data = await res.json()
-
-      if (data.temperature !== undefined) temperature.value = data.temperature
-      if (data.humidity !== undefined) humidity.value = data.humidity
-      if (data.co2 !== undefined) co2.value = data.co2
-      if (data.ac !== undefined) acOn.value = data.ac
-
-      lastUpdated.value = timeNow()
-      isConnected.value = true
-      pushHistory(temperature.value, humidity.value, co2.value)
-      addLog('Podaci dohvaćeni s ThingsBoard-a.')
+      const rows = await sourceHistory(device)
+      if (!rows.length) {
+        addLog(`Nema podataka za "${device.name}" u zadnjih ${WINDOW_MIN} min.`, 'warn')
+        return
+      }
+      const n = await insertReadings(device, rows)
+      await fetchReadings(device.id)
+      addLog(`"${device.name}": učitano ${n} stvarnih očitanja.`)
     } catch (err) {
-      isConnected.value = false
-      addLog(`Greška pri dohvatu: ${err.message}`, 'warn')
+      addLog(`Greška (${device.name}): ${err.message}`, 'warn')
+    }
+  }
+
+  // Poll the latest measurement for every sensor device and store new points.
+  async function pollOnce() {
+    for (const device of sensorDevices()) {
+      if (!device.external_id || !device.metrics?.length) continue
+      try {
+        const sample = await sourceLatest(device)
+        if (!sample.recordedAt) continue
+        const last = lastAtByDevice[device.id]
+        if (last && new Date(sample.recordedAt) <= new Date(last)) continue
+        await insertReadings(device, [
+          {
+            recorded_at: sample.recordedAt,
+            temperature: sample.temperature,
+            humidity: sample.humidity,
+            co2: sample.co2,
+          },
+        ])
+        lastAtByDevice[device.id] = sample.recordedAt
+      } catch (err) {
+        addLog(`Greška (${device.name}): ${err.message}`, 'warn')
+      }
+    }
+  }
+
+  function startLiveFeed() {
+    if (liveTimer) return
+    if (!sensorDevices().some((d) => d.external_id)) {
+      addLog('Nema senzora s tokenom za praćenje.', 'warn')
+      return
+    }
+    liveRunning.value = true
+    addLog('Praćenje uživo pokrenuto.')
+    pollOnce()
+    liveTimer = setInterval(pollOnce, LIVE_POLL_MS)
+  }
+
+  function stopLiveFeed() {
+    if (liveTimer) {
+      clearInterval(liveTimer)
+      liveTimer = null
+    }
+    if (liveRunning.value) {
+      liveRunning.value = false
+      addLog('Praćenje uživo zaustavljeno.', 'warn')
     }
   }
 
   return {
-    temperature, humidity, co2, acOn,
-    tempHistory, humidHistory, co2History,
-    lastUpdated, isConnected, logs, tbConfig,
-    tempStatus, humidStatus, co2Status,
-    dewPoint, acStatus,
-    mockTick, fetchFromThingsboard, addLog, toggleAc,
+    // state
+    room,
+    devices,
+    readingsByDevice,
+    actuations,
+    logs,
+    loading,
+    connected,
+    liveRunning,
+    // actions
+    loadRoom,
+    unload,
+    addSensorDevice,
+    addActuator,
+    importThingsboardDevice,
+    removeDevice,
+    toggleActuator,
+    refreshHistory,
+    startLiveFeed,
+    stopLiveFeed,
+    addLog,
   }
 })

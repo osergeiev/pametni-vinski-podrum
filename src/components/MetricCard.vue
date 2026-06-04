@@ -13,7 +13,9 @@
 </template>
 
 <script setup>
-defineProps({
+import { computed } from 'vue'
+
+const props = defineProps({
   label: String,
   value: Number,
   unit: String,
@@ -22,16 +24,10 @@ defineProps({
   type: String,       // 'temp' | 'humidity' | 'co2'
   status: Object,     // { label, color: 'ok'|'warn'|'bad' }
 })
-</script>
 
-<script>
-export default {
-  computed: {
-    displayValue() {
-      return this.value?.toFixed(this.decimals) ?? '—'
-    }
-  }
-}
+const displayValue = computed(() =>
+  props.value != null ? props.value.toFixed(props.decimals) : '—',
+)
 </script>
 
 <style scoped>

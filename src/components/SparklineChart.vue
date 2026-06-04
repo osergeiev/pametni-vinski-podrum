@@ -14,7 +14,7 @@
       </defs>
 
       <!-- Y axis grid lines + labels -->
-      <g v-for="tick in yTicks" :key="tick.value">
+      <g v-for="(tick, ti) in yTicks" :key="ti">
         <line
           :x1="LEFT" :y1="tick.y"
           :x2="W" :y2="tick.y"
@@ -88,8 +88,8 @@ const BOT  = 16   // space for X axis labels
 const TOP  = 6
 
 // Compute nice Y bounds (round to nearest 5 or 10 depending on range)
-const dataMin = computed(() => Math.min(...props.data))
-const dataMax = computed(() => Math.max(...props.data))
+const dataMin = computed(() => (props.data.length ? Math.min(...props.data) : 0))
+const dataMax = computed(() => (props.data.length ? Math.max(...props.data) : 1))
 
 const yMin = computed(() => {
   const range = dataMax.value - dataMin.value

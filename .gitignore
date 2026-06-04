@@ -9,6 +9,11 @@ lerna-debug.log*
 
 node_modules
 .DS_Store
+
+# Local env files (keep .env.example tracked)
+.env
+.env.*
+!.env.example
 dist
 dist-ssr
 coverage
