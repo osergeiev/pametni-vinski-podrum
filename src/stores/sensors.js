@@ -234,7 +234,7 @@ export const useSensorsStore = defineStore('sensors', () => {
     if (device.source === 'thingsboard' && device.external_id) {
       try {
         const tb = useThingsboardStore()
-        await tbsvc.sendCommand(tb.host, tb.token, device.external_id, next)
+        await tb.authFetch((tok) => tbsvc.sendCommand(tb.host, tok, device.external_id, next))
       } catch (err) {
         addLog(`ThingsBoard naredba nije prošla: ${err.message}`, 'warn')
       }
@@ -286,15 +286,19 @@ export const useSensorsStore = defineStore('sensors', () => {
     return fresh.length
   }
 
-  // Fetch from the user's ThingsBoard platform.
+  // Fetch from the user's ThingsBoard platform (auto-renews an expired token).
   async function sourceHistory(device) {
     const tb = useThingsboardStore()
-    return tbsvc.fetchHistory(tb.host, tb.token, device.external_id, device.metrics, null, WINDOW_MIN)
+    return tb.authFetch((tok) =>
+      tbsvc.fetchHistory(tb.host, tok, device.external_id, device.metrics, null, WINDOW_MIN),
+    )
   }
 
   async function sourceLatest(device) {
     const tb = useThingsboardStore()
-    return tbsvc.fetchLatest(tb.host, tb.token, device.external_id, device.metrics, null)
+    return tb.authFetch((tok) =>
+      tbsvc.fetchLatest(tb.host, tok, device.external_id, device.metrics, null),
+    )
   }
 
   // Backfill historical data for a single sensor device from its source.
@@ -319,6 +323,13 @@ export const useSensorsStore = defineStore('sensors', () => {
 
   // Poll the latest measurement for every sensor device and store new points.
   async function pollOnce() {
+    const tb = useThingsboardStore()
+    const needsTb = sensorDevices().some((d) => d.source === 'thingsboard' && d.external_id)
+    if (needsTb && !tb.connected) {
+      addLog('ThingsBoard sesija je istekla — prijavite se ponovno.', 'warn')
+      stopLiveFeed()
+      return
+    }
     for (const device of sensorDevices()) {
       if (!device.external_id || !device.metrics?.length) continue
       try {

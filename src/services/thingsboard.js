@@ -38,7 +38,7 @@ async function api(host, token, path, opts = {}) {
   return text ? JSON.parse(text) : null
 }
 
-// Log in and return a JWT.
+// Log in and return both the access JWT and the refresh token.
 export async function login(host, username, password) {
   const res = await fetch(`${trimHost(host)}/api/auth/login`, {
     method: 'POST',
@@ -56,7 +56,19 @@ export async function login(host, username, password) {
     throw new Error(msg)
   }
   const data = await res.json()
-  return data.token
+  return { token: data.token, refreshToken: data.refreshToken }
+}
+
+// Exchange a refresh token for a fresh access JWT (no password needed).
+export async function refresh(host, refreshToken) {
+  const res = await fetch(`${trimHost(host)}/api/auth/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ refreshToken }),
+  })
+  if (!res.ok) throw new Error('ThingsBoard sesija je istekla')
+  const data = await res.json()
+  return { token: data.token, refreshToken: data.refreshToken }
 }
 
 // List all tenant devices.
