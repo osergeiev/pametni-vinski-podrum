@@ -69,6 +69,23 @@
         </template>
       </template>
 
+      <!-- Regulation params (ThingsBoard asset attributes) -->
+      <section v-if="store.room?.tb_asset_id" class="panel info-panel">
+        <div class="panel-title">
+          <i class="ti ti-temperature" aria-hidden="true"></i>
+          Parametri regulacije (ThingsBoard asset)
+        </div>
+        <p class="src-note">
+          Ciljana temperatura <code>targetTemperature</code>:
+          <strong>{{ store.room.target_temperature }} °C</strong> · dozvoljeno odstupanje
+          <code>controlBand</code>: <strong>±{{ store.room.control_band }} °C</strong>.
+          Automatska klima se uključuje kada temperatura izađe iz raspona
+          {{ (store.room.target_temperature - store.room.control_band).toFixed(1) }}–{{
+            (store.room.target_temperature + store.room.control_band).toFixed(1)
+          }} °C.
+        </p>
+      </section>
+
       <!-- History info -->
       <section class="panel info-panel">
         <div class="panel-title">
@@ -155,7 +172,8 @@
               <template v-else>
                 <select v-model="importKind[d.id]" class="tb-kind">
                   <option value="sensor">Senzor</option>
-                  <option value="actuator">Aktuator</option>
+                  <option value="klima_auto">Klima (automatska)</option>
+                  <option value="klima_manual">Klima (ručna)</option>
                 </select>
                 <button class="btn-inline" :disabled="importingId === d.id" @click="importTb(d)">
                   {{ importingId === d.id ? '…' : 'Uvezi' }}
@@ -227,9 +245,10 @@ function isImported(tbId) {
 }
 
 function guessKind(d) {
-  return /klima|clima|controller|actuator|aktuator/i.test(`${d.type} ${d.name}`)
-    ? 'actuator'
-    : 'sensor'
+  const s = `${d.type} ${d.name}`
+  if (/manual|ru[čc]n|klima ?2|klima2/i.test(s)) return 'klima_manual'
+  if (/klima|clima|controller|actuator|aktuator|hvac/i.test(s)) return 'klima_auto'
+  return 'sensor'
 }
 
 async function importTb(d) {

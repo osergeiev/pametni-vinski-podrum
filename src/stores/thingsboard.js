@@ -1,6 +1,8 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import * as tb from '@/services/thingsboard'
+import { supabase } from '@/lib/supabase'
+import { useAuthStore } from '@/stores/auth'
 
 const DEFAULT_HOST = 'http://161.53.133.253:8080'
 const LS_HOST = 'tb-host'
@@ -12,6 +14,7 @@ export const useThingsboardStore = defineStore('thingsboard', () => {
   const token = ref(localStorage.getItem(LS_TOKEN) || '')
   const refreshToken = ref(localStorage.getItem(LS_REFRESH) || '')
   const devices = ref([])
+  const customerId = ref('')
   const connecting = ref(false)
   const error = ref('')
 
@@ -32,6 +35,7 @@ export const useThingsboardStore = defineStore('thingsboard', () => {
       const { token: jwt, refreshToken: rt } = await tb.login(host.value, username, password)
       localStorage.setItem(LS_HOST, host.value)
       persist(jwt, rt)
+      await ensureCustomer()
       await loadDevices()
       return true
     } catch (err) {
@@ -80,10 +84,40 @@ export const useThingsboardStore = defineStore('thingsboard', () => {
     }
   }
 
+  // Ensure this app account maps to exactly one ThingsBoard customer.
+  // Reuses the stored mapping if present, otherwise creates the customer
+  // (titled by the user's email) and persists the mapping in `profiles`.
+  async function ensureCustomer() {
+    const auth = useAuthStore()
+    if (!auth.user?.id) return ''
+    const title = auth.email || `app-${auth.user.id}`
+    try {
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('tb_customer_id')
+        .eq('id', auth.user.id)
+        .maybeSingle()
+      if (profile?.tb_customer_id) {
+        customerId.value = profile.tb_customer_id
+        return customerId.value
+      }
+      const id = await authFetch((tok) => tb.ensureCustomer(host.value, tok, title))
+      customerId.value = id
+      await supabase
+        .from('profiles')
+        .upsert({ id: auth.user.id, tb_customer_id: id, tb_customer_title: title })
+      return id
+    } catch (err) {
+      error.value = `ThingsBoard customer: ${err.message}`
+      return ''
+    }
+  }
+
   function disconnect() {
     token.value = ''
     refreshToken.value = ''
     devices.value = []
+    customerId.value = ''
     localStorage.removeItem(LS_TOKEN)
     localStorage.removeItem(LS_REFRESH)
   }
@@ -93,6 +127,7 @@ export const useThingsboardStore = defineStore('thingsboard', () => {
     token,
     refreshToken,
     devices,
+    customerId,
     connecting,
     error,
     connected,
@@ -100,6 +135,7 @@ export const useThingsboardStore = defineStore('thingsboard', () => {
     refresh,
     authFetch,
     loadDevices,
+    ensureCustomer,
     disconnect,
   }
 })

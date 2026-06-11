@@ -160,3 +160,123 @@ export async function sendCommand(host, token, deviceId, on) {
     body: JSON.stringify({ desiredMode: on ? 'HEAT' : 'OFF', enabled: on }),
   })
 }
+
+// ---------------------------------------------------------------------------
+// Provisioning (requires a tenant-administrator token)
+// ---------------------------------------------------------------------------
+
+// Find a customer by exact title, or create it. Returns its id (string).
+export async function ensureCustomer(host, token, title) {
+  const found = await api(
+    host,
+    token,
+    `/api/customers?pageSize=100&page=0&textSearch=${encodeURIComponent(title)}`,
+  )
+  const match = (found?.data || []).find((c) => c.title === title)
+  if (match) return match.id.id
+  const created = await api(host, token, '/api/customer', {
+    method: 'POST',
+    body: JSON.stringify({ title }),
+  })
+  return created.id.id
+}
+
+// Create an asset under the "wine-cellar-zone" asset profile. In ThingsBoard
+// the asset `type` equals the asset-profile name, so this links to the
+// existing profile (and its predefined attributes). Returns its id.
+export async function createAsset(host, token, name, type = 'wine-cellar-zone') {
+  const created = await api(host, token, '/api/asset', {
+    method: 'POST',
+    body: JSON.stringify({ name, type }),
+  })
+  return created.id.id
+}
+
+export async function deleteAsset(host, token, assetId) {
+  await api(host, token, `/api/asset/${assetId}`, { method: 'DELETE' })
+}
+
+export async function assignAssetToCustomer(host, token, customerId, assetId) {
+  await api(host, token, `/api/customer/${customerId}/asset/${assetId}`, { method: 'POST' })
+}
+
+// Write SERVER_SCOPE attributes on any entity (e.g. an asset).
+export async function saveServerAttributes(host, token, entityType, entityId, attrs) {
+  await api(host, token, `/api/plugins/telemetry/${entityType}/${entityId}/attributes/SERVER_SCOPE`, {
+    method: 'POST',
+    body: JSON.stringify(attrs),
+  })
+}
+
+// Map a device to its ThingsBoard "Contains_*" relation type(s).
+// Sensors get one relation per measured metric; actuators by klima role.
+const METRIC_RELATION = {
+  temperature: 'Contains_temp',
+  humidity: 'Contains_humidity',
+  co2: 'Contains_CO2',
+}
+export function containsTypes(device) {
+  if (device.type === 'sensor') {
+    return (device.metrics || []).map((m) => METRIC_RELATION[m]).filter(Boolean)
+  }
+  if (device.role === 'klima_auto') return ['Contains_auto_AC']
+  if (device.role === 'klima_manual') return ['Contains_manual_AC']
+  return ['Contains']
+}
+
+// Create a relation (COMMON type group). `from`/`to` are { entityType, id }.
+export async function createRelation(host, token, from, to, relationType) {
+  await api(host, token, '/api/relation', {
+    method: 'POST',
+    body: JSON.stringify({
+      from: { entityType: from.entityType, id: from.id },
+      to: { entityType: to.entityType, id: to.id },
+      type: relationType,
+      typeGroup: 'COMMON',
+    }),
+  })
+}
+
+export async function deleteRelation(host, token, from, to, relationType) {
+  const q =
+    `?fromId=${from.id}&fromType=${from.entityType}` +
+    `&relationType=${encodeURIComponent(relationType)}&relationTypeGroup=COMMON` +
+    `&toId=${to.id}&toType=${to.entityType}`
+  await api(host, token, `/api/relation${q}`, { method: 'DELETE' })
+}
+
+// True if the asset still exists; false on 404. Other HTTP errors throw
+// (so an expired token can be refreshed/retried by the caller).
+export async function assetExists(host, token, assetId) {
+  const res = await fetch(`${trimHost(host)}/api/asset/${assetId}`, {
+    headers: { 'X-Authorization': `Bearer ${token}` },
+  })
+  if (res.status === 404) return false
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return true
+}
+
+// List assets currently assigned to a customer.
+export async function listCustomerAssets(host, token, customerId) {
+  const data = await api(host, token, `/api/customer/${customerId}/assets?pageSize=200&page=0`)
+  return (data?.data || []).map((a) => ({ id: a.id.id, name: a.name, type: a.type }))
+}
+
+// List every asset in the tenant (tenant-admin view). Includes assets not yet
+// assigned to any customer.
+export async function listTenantAssets(host, token) {
+  const data = await api(host, token, '/api/tenant/assets?pageSize=200&page=0')
+  return (data?.data || []).map((a) => ({ id: a.id.id, name: a.name, type: a.type }))
+}
+
+// Read SERVER_SCOPE attributes; returns a { key: value } map.
+export async function getServerAttributes(host, token, entityType, entityId, keys) {
+  const data = await api(
+    host,
+    token,
+    `/api/plugins/telemetry/${entityType}/${entityId}/values/attributes/SERVER_SCOPE?keys=${keys.join(',')}`,
+  )
+  const out = {}
+  for (const a of data || []) out[a.key] = a.value
+  return out
+}

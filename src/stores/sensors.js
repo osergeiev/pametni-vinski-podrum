@@ -60,7 +60,7 @@ export const useSensorsStore = defineStore('sensors', () => {
   async function fetchRoom(roomId) {
     const { data, error } = await supabase
       .from('rooms')
-      .select('id, name, location, created_at')
+      .select('id, name, location, created_at, tb_asset_id, target_temperature, control_band')
       .eq('id', roomId)
       .single()
     if (error) {
@@ -73,7 +73,7 @@ export const useSensorsStore = defineStore('sensors', () => {
   async function fetchDevices(roomId) {
     const { data } = await supabase
       .from('devices')
-      .select('id, name, type, external_id, metrics, state, source, created_at')
+      .select('id, name, type, external_id, metrics, state, source, role, created_at')
       .eq('room_id', roomId)
       .order('created_at', { ascending: true })
     devices.value = data ?? []
@@ -157,7 +157,7 @@ export const useSensorsStore = defineStore('sensors', () => {
   }
 
   // --- Devices ---
-  async function addSensorDevice({ name, external_id, metrics, source = 'thingsboard' }) {
+  async function addSensorDevice({ name, external_id, metrics, source = 'thingsboard', role = 'sensor' }) {
     const { data, error } = await supabase
       .from('devices')
       .insert({
@@ -167,6 +167,7 @@ export const useSensorsStore = defineStore('sensors', () => {
         external_id: external_id || null,
         metrics: metrics || [],
         source,
+        role,
       })
       .select()
       .single()
@@ -181,10 +182,18 @@ export const useSensorsStore = defineStore('sensors', () => {
     return data
   }
 
-  async function addActuator({ name, external_id = null, source = 'thingsboard' }) {
+  async function addActuator({ name, external_id = null, source = 'thingsboard', role = 'klima_manual' }) {
     const { data, error } = await supabase
       .from('devices')
-      .insert({ room_id: room.value.id, name, type: 'actuator', state: false, external_id, source })
+      .insert({
+        room_id: room.value.id,
+        name,
+        type: 'actuator',
+        state: false,
+        external_id,
+        source,
+        role,
+      })
       .select()
       .single()
     if (error) throw error
@@ -193,30 +202,83 @@ export const useSensorsStore = defineStore('sensors', () => {
     return data
   }
 
+  // Create the ThingsBoard relations for a freshly imported device:
+  // asset "Contains" device, and (temp sensor) "Manages" (automatic klima).
+  async function wireRelations() {
+    const tb = useThingsboardStore()
+    const assetId = room.value?.tb_asset_id
+    try {
+      const withId = devices.value.filter((d) => d.external_id)
+      if (assetId) {
+        for (const d of withId) {
+          for (const relType of tbsvc.containsTypes(d)) {
+            await tb.authFetch((tok) =>
+              tbsvc.createRelation(
+                tb.host,
+                tok,
+                { entityType: 'ASSET', id: assetId },
+                { entityType: 'DEVICE', id: d.external_id },
+                relType,
+              ),
+            )
+          }
+        }
+      }
+      const tempSensor = withId.find(
+        (d) => d.type === 'sensor' && (d.metrics || []).includes('temperature'),
+      )
+      const klimaAuto = withId.find((d) => d.role === 'klima_auto')
+      if (tempSensor && klimaAuto) {
+        await tb.authFetch((tok) =>
+          tbsvc.createRelation(
+            tb.host,
+            tok,
+            { entityType: 'DEVICE', id: tempSensor.external_id },
+            { entityType: 'DEVICE', id: klimaAuto.external_id },
+            'Manages',
+          ),
+        )
+      }
+    } catch (err) {
+      addLog(`Relacija nije stvorena: ${err.message}`, 'warn')
+    }
+  }
+
   // Import a device discovered on ThingsBoard into the current room.
-  async function importThingsboardDevice(tbDevice, kind) {
+  // role: 'sensor' | 'klima_auto' | 'klima_manual'
+  async function importThingsboardDevice(tbDevice, role = 'sensor') {
     const exists = devices.value.find((d) => d.external_id === tbDevice.id)
     if (exists) {
       addLog(`"${tbDevice.name}" je već uvezen.`, 'warn')
       return exists
     }
-    if (kind === 'actuator') {
-      return addActuator({ name: tbDevice.name, external_id: tbDevice.id, source: 'thingsboard' })
-    }
     const tb = useThingsboardStore()
-    let metrics = []
-    try {
-      const info = await tbsvc.detect(tb.host, tb.token, tbDevice.id)
-      metrics = info.metrics
-    } catch (err) {
-      addLog(`Ne mogu pročitati veličine za "${tbDevice.name}": ${err.message}`, 'warn')
+    let created
+    if (role === 'sensor') {
+      let metrics = []
+      try {
+        const info = await tb.authFetch((tok) => tbsvc.detect(tb.host, tok, tbDevice.id))
+        metrics = info.metrics
+      } catch (err) {
+        addLog(`Ne mogu pročitati veličine za "${tbDevice.name}": ${err.message}`, 'warn')
+      }
+      created = await addSensorDevice({
+        name: tbDevice.name,
+        external_id: tbDevice.id,
+        metrics,
+        source: 'thingsboard',
+        role: 'sensor',
+      })
+    } else {
+      created = await addActuator({
+        name: tbDevice.name,
+        external_id: tbDevice.id,
+        source: 'thingsboard',
+        role,
+      })
     }
-    return addSensorDevice({
-      name: tbDevice.name,
-      external_id: tbDevice.id,
-      metrics,
-      source: 'thingsboard',
-    })
+    await wireRelations()
+    return created
   }
 
   async function removeDevice(id) {

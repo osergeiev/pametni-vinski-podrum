@@ -3,7 +3,10 @@
     <div class="act-info">
       <i class="ti ti-air-conditioning" aria-hidden="true"></i>
       <div>
-        <div class="act-name">{{ device.name }}</div>
+        <div class="act-name">
+          {{ device.name }}
+          <span class="act-mode">{{ isAuto ? 'automatska' : 'ručna' }}</span>
+        </div>
         <div class="act-state" :class="{ on: device.state }">
           {{ device.state ? 'Uključeno' : 'Isključeno' }}
         </div>
@@ -11,7 +14,16 @@
     </div>
 
     <div class="act-controls">
-      <button class="act-toggle" :class="{ active: device.state }" @click="$emit('toggle', device)">
+      <span v-if="isAuto" class="act-auto-note">
+        <i class="ti ti-bolt-filled" aria-hidden="true"></i>
+        Upravlja senzor temperature
+      </span>
+      <button
+        v-else
+        class="act-toggle"
+        :class="{ active: device.state }"
+        @click="$emit('toggle', device)"
+      >
         <i class="ti" :class="device.state ? 'ti-power' : 'ti-player-play'" aria-hidden="true"></i>
         {{ device.state ? 'Isključi' : 'Uključi' }}
       </button>
@@ -27,10 +39,14 @@
 </template>
 
 <script setup>
-defineProps({
+import { computed } from 'vue'
+
+const props = defineProps({
   device: { type: Object, required: true },
 })
 defineEmits(['toggle', 'remove'])
+
+const isAuto = computed(() => props.device.role === 'klima_auto')
 </script>
 
 <style scoped>
@@ -59,6 +75,27 @@ defineEmits(['toggle', 'remove'])
   font-size: 1.05rem;
   font-style: italic;
   color: #f0e6d3;
+}
+.act-mode {
+  font-size: 0.6rem;
+  font-style: normal;
+  font-family: 'Courier New', monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: #8a6840;
+  border: 1px solid rgba(180, 120, 60, 0.3);
+  border-radius: 4px;
+  padding: 1px 6px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+.act-auto-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.72rem;
+  font-family: 'Courier New', monospace;
+  color: #c8923f;
 }
 .act-state {
   font-size: 0.72rem;

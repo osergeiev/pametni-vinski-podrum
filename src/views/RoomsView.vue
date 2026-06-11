@@ -6,6 +6,10 @@
         <p class="subtitle">Moje vinske prostorije</p>
       </div>
       <div class="user-box">
+        <button class="btn-ghost tb-toggle" :class="{ on: tb.connected }" @click="openTb">
+          <span class="dot" :class="{ connected: tb.connected }"></span>
+          {{ tb.connected ? 'ThingsBoard spojen' : 'Poveži ThingsBoard' }}
+        </button>
         <span class="user-email">{{ auth.email }}</span>
         <button class="btn-ghost" @click="logout">
           <i class="ti ti-logout" aria-hidden="true"></i> Odjava
@@ -34,6 +38,15 @@
           <i class="ti ti-cpu" aria-hidden="true"></i>
           {{ deviceCount(room) }} {{ deviceCount(room) === 1 ? 'uređaj' : 'uređaja' }}
         </span>
+        <button
+          v-if="room.assetMissing && tb.connected"
+          class="asset-warn"
+          title="Asset je obrisan na ThingsBoardu"
+          @click.prevent.stop="recreate(room)"
+        >
+          <i class="ti ti-alert-triangle" aria-hidden="true"></i>
+          {{ recreatingId === room.id ? 'Kreiram…' : 'Asset obrisan — ponovo kreiraj' }}
+        </button>
       </RouterLink>
 
       <!-- Add new room -->
@@ -61,6 +74,24 @@
             <label>Lokacija (opcionalno)</label>
             <input v-model.trim="form.location" placeholder="npr. Podrum, sjever" />
           </div>
+          <div class="field-row">
+            <div class="field">
+              <label>Ciljana temperatura (°C)</label>
+              <input v-model.number="form.targetTemperature" type="number" step="0.5" />
+            </div>
+            <div class="field">
+              <label>Dozvoljeno odstupanje (±°C)</label>
+              <input v-model.number="form.controlBand" type="number" step="0.5" min="0" />
+            </div>
+          </div>
+          <p class="form-hint">
+            <i class="ti" :class="tb.connected ? 'ti-plug-connected' : 'ti-plug-off'" aria-hidden="true"></i>
+            {{
+              tb.connected
+                ? 'Kreirat će se asset u ThingsBoardu (controlBand, targetTemperature) i dodijeliti vašem customeru.'
+                : 'Niste spojeni na ThingsBoard — prostorija će biti spremljena bez asseta.'
+            }}
+          </p>
           <p v-if="formError" class="auth-error">{{ formError }}</p>
           <div class="modal-actions">
             <button type="button" class="btn-ghost" @click="closeForm">Odustani</button>
@@ -71,33 +102,146 @@
         </form>
       </div>
     </div>
+
+    <!-- ThingsBoard connect modal -->
+    <div v-if="showTb" class="modal-backdrop" @click.self="showTb = false">
+      <div class="modal">
+        <h3>ThingsBoard</h3>
+        <form v-if="!tb.connected" @submit.prevent="connectTb">
+          <div class="field">
+            <label>Host URL</label>
+            <input v-model.trim="tbForm.host" placeholder="http://161.53.133.253:8080" />
+          </div>
+          <div class="field">
+            <label>Email</label>
+            <input v-model.trim="tbForm.username" type="email" autocomplete="username" />
+          </div>
+          <div class="field">
+            <label>Lozinka</label>
+            <input v-model="tbForm.password" type="password" autocomplete="current-password" />
+          </div>
+          <p v-if="tb.error" class="auth-error">{{ tb.error }}</p>
+          <div class="modal-actions">
+            <button type="button" class="btn-ghost" @click="showTb = false">Zatvori</button>
+            <button type="submit" class="btn-primary" :disabled="tb.connecting">
+              {{ tb.connecting ? 'Spajam…' : 'Spoji se' }}
+            </button>
+          </div>
+        </form>
+        <template v-else>
+          <p class="form-hint">
+            <span class="dot connected"></span> Spojeni ste na {{ tb.host }}
+          </p>
+
+          <div class="asset-block">
+            <div class="asset-block-title">
+              Postojeći asseti na ThingsBoardu
+              <button class="btn-inline" @click="store.fetchTbAssets()">
+                <i class="ti ti-refresh" aria-hidden="true"></i>
+              </button>
+            </div>
+            <p v-if="!store.tbAssets.length" class="form-hint">
+              Nema dodatnih asseta koji već nisu povezani s prostorijom.
+            </p>
+            <div v-else class="asset-list">
+              <div v-for="a in store.tbAssets" :key="a.id" class="asset-item">
+                <span class="asset-name">{{ a.name }}</span>
+                <button class="btn-inline" :disabled="linkingId === a.id" @click="link(a)">
+                  {{ linkingId === a.id ? '…' : 'Poveži kao prostoriju' }}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="modal-actions">
+            <button type="button" class="btn-ghost" @click="tb.disconnect()">Odspoji</button>
+            <button type="button" class="btn-primary" @click="showTb = false">Zatvori</button>
+          </div>
+        </template>
+      </div>
+    </div>
   </main>
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, reactive, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useRoomsStore } from '@/stores/rooms'
 import { useAuthStore } from '@/stores/auth'
+import { useThingsboardStore } from '@/stores/thingsboard'
 
 const store = useRoomsStore()
 const auth = useAuthStore()
+const tb = useThingsboardStore()
 const router = useRouter()
 
 const showForm = ref(false)
 const busy = ref(false)
 const formError = ref('')
-const form = ref({ name: '', location: '' })
+const form = ref({ name: '', location: '', targetTemperature: 13, controlBand: 1 })
+
+const showTb = ref(false)
+const tbForm = reactive({ host: tb.host, username: '', password: '' })
+const recreatingId = ref('')
+const linkingId = ref('')
 
 onMounted(() => store.fetchRooms())
+
+// When ThingsBoard becomes connected, reconcile assets and load existing ones.
+watch(
+  () => tb.connected,
+  (connected) => {
+    if (connected) {
+      store.syncAssets()
+      store.fetchTbAssets()
+    }
+  },
+  { immediate: true },
+)
 
 function deviceCount(room) {
   return room.devices?.[0]?.count ?? 0
 }
 
+async function openTb() {
+  showTb.value = true
+  if (tb.connected) await store.fetchTbAssets()
+}
+
+async function connectTb() {
+  const ok = await tb.connect(tbForm.host, tbForm.username, tbForm.password)
+  if (ok) {
+    tbForm.password = ''
+    await store.syncAssets()
+    await store.fetchTbAssets()
+  }
+}
+
+async function recreate(room) {
+  recreatingId.value = room.id
+  try {
+    await store.recreateAsset(room.id)
+  } catch (err) {
+    alert('Greška: ' + err.message)
+  } finally {
+    recreatingId.value = ''
+  }
+}
+
+async function link(asset) {
+  linkingId.value = asset.id
+  try {
+    await store.linkExistingAsset(asset)
+  } catch (err) {
+    alert('Greška: ' + err.message)
+  } finally {
+    linkingId.value = ''
+  }
+}
+
 function closeForm() {
   showForm.value = false
-  form.value = { name: '', location: '' }
+  form.value = { name: '', location: '', targetTemperature: 13, controlBand: 1 }
   formError.value = ''
 }
 
@@ -105,7 +249,12 @@ async function create() {
   busy.value = true
   formError.value = ''
   try {
-    await store.createRoom({ name: form.value.name, location: form.value.location })
+    await store.createRoom({
+      name: form.value.name,
+      location: form.value.location,
+      targetTemperature: form.value.targetTemperature,
+      controlBand: form.value.controlBand,
+    })
     closeForm()
   } catch (err) {
     formError.value = err.message
@@ -308,6 +457,90 @@ async function logout() {
 .field input:focus { border-color: rgba(212, 169, 106, 0.6); }
 
 .auth-error { color: #e06a5a; font-size: 0.78rem; font-family: 'Courier New', monospace; }
+
+.field-row { display: flex; gap: 0.75rem; }
+.field-row .field { flex: 1; }
+
+.form-hint {
+  font-size: 0.72rem;
+  color: #8a6840;
+  font-family: 'Courier New', monospace;
+  line-height: 1.5;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.tb-toggle { gap: 8px; }
+.tb-toggle.on { color: #d4a96a; border-color: rgba(212, 169, 106, 0.4); }
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #7a5a38;
+  display: inline-block;
+}
+.dot.connected { background: #4a8a5a; }
+
+.asset-warn {
+  margin-top: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(192, 57, 43, 0.12);
+  border: 1px solid rgba(192, 57, 43, 0.4);
+  color: #e08a7a;
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 0.62rem;
+  font-family: 'Courier New', monospace;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+.asset-warn:hover { background: rgba(192, 57, 43, 0.2); }
+
+.asset-block {
+  margin-top: 1rem;
+  border-top: 1px solid rgba(180, 120, 60, 0.2);
+  padding-top: 1rem;
+}
+.asset-block-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.65rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #8a6840;
+  font-family: 'Courier New', monospace;
+  margin-bottom: 0.5rem;
+}
+.asset-list { display: flex; flex-direction: column; gap: 0.5rem; }
+.asset-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  background: #1a0a05;
+  border: 1px solid rgba(180, 120, 60, 0.25);
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+.asset-name { font-size: 0.85rem; color: #f0e6d3; }
+
+.btn-inline {
+  background: transparent;
+  border: 1px solid rgba(212, 169, 106, 0.4);
+  color: #d4a96a;
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-size: 0.68rem;
+  font-family: 'Courier New', monospace;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-inline:hover:not(:disabled) { background: rgba(212, 169, 106, 0.15); }
+.btn-inline:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .modal-actions {
   display: flex;
