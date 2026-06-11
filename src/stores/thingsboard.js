@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import * as tb from '@/services/thingsboard'
 import { supabase } from '@/lib/supabase'
 import { useAuthStore } from '@/stores/auth'
@@ -19,6 +19,17 @@ export const useThingsboardStore = defineStore('thingsboard', () => {
   const error = ref('')
 
   const connected = computed(() => !!token.value)
+
+  // The customer is per app-account. If the logged-in user changes (logout or
+  // switching accounts), drop the cached customer so we never reuse another
+  // user's customer.
+  const auth = useAuthStore()
+  watch(
+    () => auth.user?.id,
+    () => {
+      customerId.value = ''
+    },
+  )
 
   function persist(jwt, rt) {
     token.value = jwt

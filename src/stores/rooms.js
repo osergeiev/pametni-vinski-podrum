@@ -90,7 +90,7 @@ export const useRoomsStore = defineStore('rooms', () => {
     if (!tb.connected) throw new Error('Niste spojeni na ThingsBoard.')
     const room = rooms.value.find((r) => r.id === roomId)
     if (!room) return
-    const customerId = tb.customerId || (await tb.ensureCustomer())
+    const customerId = await tb.ensureCustomer()
     const assetId = await tb.authFetch((tok) => tbsvc.createAsset(tb.host, tok, room.name))
     if (customerId) {
       await tb.authFetch((tok) => tbsvc.assignAssetToCustomer(tb.host, tok, customerId, assetId))
@@ -136,7 +136,7 @@ export const useRoomsStore = defineStore('rooms', () => {
       )
       if (attrs.targetTemperature != null) target = Number(attrs.targetTemperature)
       if (attrs.controlBand != null) band = Number(attrs.controlBand)
-      const customerId = tb.customerId || (await tb.ensureCustomer())
+      const customerId = await tb.ensureCustomer()
       if (customerId) {
         await tb.authFetch((tok) =>
           tbsvc.assignAssetToCustomer(tb.host, tok, customerId, asset.id),
@@ -171,7 +171,7 @@ export const useRoomsStore = defineStore('rooms', () => {
 
     let tbAssetId = null
     if (tb.connected) {
-      const customerId = tb.customerId || (await tb.ensureCustomer())
+      const customerId = await tb.ensureCustomer()
       tbAssetId = await tb.authFetch((tok) => tbsvc.createAsset(tb.host, tok, name))
       try {
         if (customerId) {
