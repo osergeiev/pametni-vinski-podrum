@@ -89,7 +89,12 @@ export const useThingsboardStore = defineStore('thingsboard', () => {
   async function loadDevices() {
     error.value = ''
     try {
-      devices.value = await authFetch((tok) => tb.listDevices(host.value, tok))
+      const cid = customerId.value || (await ensureCustomer())
+      if (!cid) {
+        devices.value = []
+        return
+      }
+      devices.value = await authFetch((tok) => tb.listCustomerDevices(host.value, tok, cid))
     } catch (err) {
       error.value = err.message
     }

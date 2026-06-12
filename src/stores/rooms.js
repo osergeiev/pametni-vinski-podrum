@@ -107,13 +107,15 @@ export const useRoomsStore = defineStore('rooms', () => {
     room.assetMissing = false
   }
 
-  // List ThingsBoard assets (whole tenant) that aren't linked to a room yet.
+  // List this customer's ThingsBoard assets that aren't linked to a room yet.
   async function fetchTbAssets() {
     const tb = useThingsboardStore()
     tbAssets.value = []
     if (!tb.connected) return
     try {
-      const list = await tb.authFetch((tok) => tbsvc.listTenantAssets(tb.host, tok))
+      const customerId = await tb.ensureCustomer()
+      if (!customerId) return
+      const list = await tb.authFetch((tok) => tbsvc.listCustomerAssets(tb.host, tok, customerId))
       const linked = new Set(rooms.value.map((r) => r.tb_asset_id).filter(Boolean))
       tbAssets.value = list.filter((a) => !linked.has(a.id))
     } catch (err) {

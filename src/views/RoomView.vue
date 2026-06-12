@@ -232,7 +232,10 @@ async function remove(device) {
 // --- ThingsBoard ---
 async function openTb() {
   showTb.value = true
-  if (tb.connected) await tb.loadDevices()
+  if (tb.connected) {
+    await tb.ensureCustomer()
+    await tb.loadDevices()
+  }
 }
 
 async function connectTb() {

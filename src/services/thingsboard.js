@@ -71,9 +71,10 @@ export async function refresh(host, refreshToken) {
   return { token: data.token, refreshToken: data.refreshToken }
 }
 
-// List all tenant devices.
-export async function listDevices(host, token) {
-  const data = await api(host, token, '/api/tenant/devices?pageSize=200&page=0')
+// List the devices ThingsBoard has assigned to this customer. The tenant admin
+// manages assignments in ThingsBoard; the app only reads them.
+export async function listCustomerDevices(host, token, customerId) {
+  const data = await api(host, token, `/api/customer/${customerId}/devices?pageSize=200&page=0`)
   return (data?.data || []).map((d) => ({ id: d.id.id, name: d.name, type: d.type }))
 }
 
@@ -261,14 +262,6 @@ export async function listCustomerAssets(host, token, customerId) {
   const data = await api(host, token, `/api/customer/${customerId}/assets?pageSize=200&page=0`)
   return (data?.data || []).map((a) => ({ id: a.id.id, name: a.name, type: a.type }))
 }
-
-// List every asset in the tenant (tenant-admin view). Includes assets not yet
-// assigned to any customer.
-export async function listTenantAssets(host, token) {
-  const data = await api(host, token, '/api/tenant/assets?pageSize=200&page=0')
-  return (data?.data || []).map((a) => ({ id: a.id.id, name: a.name, type: a.type }))
-}
-
 // Read SERVER_SCOPE attributes; returns a { key: value } map.
 export async function getServerAttributes(host, token, entityType, entityId, keys) {
   const data = await api(
